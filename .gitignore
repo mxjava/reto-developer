@@ -31,6 +31,9 @@ Reto_Developer.pdf
 # Internal tooling / generated metadata
 /.github/
 
+# Local helper scripts
+/SUBIR_A_GITHUB.bat
+
 # Drive synchronization temporary files
 .tmp.driveupload
 .tmp.drivedownload
