@@ -1,0 +1,36 @@
+# Java
+**/target/
+*.log
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Node
+transaction-front/node_modules/
+transaction-front/dist/
+transaction-front/.env
+transaction-front/.env.*
+!transaction-front/.env.example
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation excluded from Git delivery
+/docs/
+SECURITY.md
+Reto_Developer.pdf
+
+# Internal tooling / generated metadata
+/.github/
+
+# Drive synchronization temporary files
+.tmp.driveupload
+.tmp.drivedownload
