@@ -18,6 +18,35 @@ function Test-Port([int]$Port) {
     return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
+function Copy-VerifiedJar {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [string]$Component
+    )
+
+    if (-not (Test-Path $Source -PathType Leaf)) {
+        throw "No existe el JAR de ${Component}: $Source"
+    }
+
+    $sourceInfo = Get-Item $Source
+    if ($sourceInfo.Length -lt 1MB) {
+        throw "El JAR de $Component es demasiado pequeno ($($sourceInfo.Length) bytes). " +
+              "Puede estar incompleto o haber sido alterado por sincronizacion."
+    }
+
+    Copy-Item $Source $Destination -Force
+
+    $sourceHash = (Get-FileHash $Source -Algorithm SHA256).Hash
+    $destinationHash = (Get-FileHash $Destination -Algorithm SHA256).Hash
+
+    if ($sourceHash -ne $destinationHash) {
+        throw "La copia de runtime de $Component no coincide con el JAR generado."
+    }
+
+    Write-Host "[OK] $Component copiado a runtime local seguro." -ForegroundColor Green
+}
+
 function Wait-ForPort {
     param(
         [int]$Port,
@@ -137,18 +166,18 @@ $env:SECURITY_JWT_TTL_MINUTES = "15"
 $env:VITE_API_URL = "http://localhost:8081"
 $env:VITE_AES_KEY_BASE64 = $env:APP_AES_KEY_BASE64
 
-Write-Host "[0/6] Limpiando duplicados de sincronizacion..."
+Write-Host "[0/7] Limpiando duplicados de sincronizacion..."
 Remove-StaleSyncDuplicates -Root $ProjectRoot
 
-Write-Host "[1/6] Aplicando formato Java estandar..."
+Write-Host "[1/7] Aplicando formato Java estandar..."
 & $Maven -f (Join-Path $ProjectRoot "pom.xml") -DskipTests spotless:apply
 if ($LASTEXITCODE -ne 0) { throw "El formateo Java fallo. No se iniciara la demo." }
 
-Write-Host "[2/6] Validando build backend..."
+Write-Host "[2/7] Validando build backend..."
 & $Maven -f (Join-Path $ProjectRoot "pom.xml") package
 if ($LASTEXITCODE -ne 0) { throw "El build backend fallo. No se iniciara la demo." }
 
-Write-Host "[3/6] Validando build frontend..."
+Write-Host "[3/7] Validando build frontend..."
 $frontRoot = Join-Path $ProjectRoot "transaction-front"
 $viteCmd = Join-Path $frontRoot "node_modules\.bin\vite.cmd"
 
@@ -169,18 +198,29 @@ try {
 }
 finally { Pop-Location }
 
-$serviceJar = Join-Path $ProjectRoot "transaction-service-api\target\transaction-service-api-1.1.0-SNAPSHOT.jar"
-$gatewayJar = Join-Path $ProjectRoot "transaction-gateway-api\target\transaction-gateway-api-1.1.0-SNAPSHOT.jar"
+$serviceJarSource = Join-Path $ProjectRoot "transaction-service-api\target\transaction-service-api-1.1.0-SNAPSHOT.jar"
+$gatewayJarSource = Join-Path $ProjectRoot "transaction-gateway-api\target\transaction-gateway-api-1.1.0-SNAPSHOT.jar"
 
-if (-not (Test-Path $serviceJar)) { throw "No existe el JAR del service: $serviceJar" }
-if (-not (Test-Path $gatewayJar)) { throw "No existe el JAR del gateway: $gatewayJar" }
+# No ejecutar los fat JAR directamente desde una carpeta sincronizada.
+# Spring Boot carga dependencias anidadas de forma diferida; si Drive reemplaza el
+# archivo mientras el proceso esta vivo pueden aparecer NoClassDefFoundError.
+$runtimeBase = Join-Path $env:LOCALAPPDATA "RetoDeveloper\runtime"
+$runtimeRoot = Join-Path $runtimeBase ([Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+
+$serviceJar = Join-Path $runtimeRoot "transaction-service-api.jar"
+$gatewayJar = Join-Path $runtimeRoot "transaction-gateway-api.jar"
+
+Write-Host "[4/7] Preparando runtime local fuera de sincronizacion..."
+Copy-VerifiedJar -Source $serviceJarSource -Destination $serviceJar -Component "Transaction Service"
+Copy-VerifiedJar -Source $gatewayJarSource -Destination $gatewayJar -Component "Transaction Gateway"
 
 $javaExe = Join-Path $JavaHome "bin\java.exe"
-$serviceCmd = "Set-Location '$ProjectRoot'; & '$javaExe' -jar '$serviceJar'"
-$gatewayCmd = "Set-Location '$ProjectRoot'; & '$javaExe' -jar '$gatewayJar'"
+$serviceCmd = "Set-Location '$runtimeRoot'; & '$javaExe' -jar '$serviceJar'"
+$gatewayCmd = "Set-Location '$runtimeRoot'; & '$javaExe' -jar '$gatewayJar'"
 $frontCmd = "Set-Location '$frontRoot'; & '$Npm' run dev"
 
-Write-Host "[4/6] Iniciando Transaction Service :8082..."
+Write-Host "[5/7] Iniciando Transaction Service :8082..."
 Start-Process powershell.exe -ArgumentList "-NoExit","-Command",$serviceCmd
 Wait-ForPort -Port 8082 -TimeoutSeconds 60 -Component "Transaction Service"
 Wait-ForPort -Port 9092 -TimeoutSeconds 30 -Component "H2 TCP Server"
@@ -188,11 +228,11 @@ Wait-ForPort -Port 9092 -TimeoutSeconds 30 -Component "H2 TCP Server"
 # El Service ya heredó el password; evitar que quede persistido en esta sesión del launcher.
 Remove-Item Env:APP_BOOTSTRAP_PASSWORD -ErrorAction SilentlyContinue
 
-Write-Host "[5/6] Iniciando Transaction Gateway :8081..."
+Write-Host "[6/7] Iniciando Transaction Gateway :8081..."
 Start-Process powershell.exe -ArgumentList "-NoExit","-Command",$gatewayCmd
 Wait-ForPort -Port 8081 -TimeoutSeconds 60 -Component "Transaction Gateway"
 
-Write-Host "[6/6] Iniciando Frontend :5173..."
+Write-Host "[7/7] Iniciando Frontend :5173..."
 Start-Process powershell.exe -ArgumentList "-NoExit","-Command",$frontCmd
 Wait-ForPort -Port 5173 -TimeoutSeconds 30 -Component "Frontend"
 
@@ -206,5 +246,6 @@ Write-Host "  H2 JDBC    : jdbc:h2:tcp://localhost:9092/mem:transactionsdb"
 Write-Host "  H2 Usuario : $env:H2_DB_USERNAME"
 Write-Host "  H2 Password: $env:H2_DB_PASSWORD"
 Write-Host "  Login      : admin + password capturado al inicio de este arranque"
+Write-Host "  Runtime JAR: $runtimeRoot"
 Write-Host ""
 Write-Host "La contraseña de admin no se imprime ni se persiste. El password H2 es efimero y cambia en cada arranque."
